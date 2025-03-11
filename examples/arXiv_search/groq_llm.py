@@ -4,8 +4,10 @@ import logging
 import datetime
 import traceback
 import re
+import asyncio
 from pathlib import Path
 import inspect
+import ssl  # Import the ssl module
 
 from models import GroqChatRequest, GroqMessage, ArXivRequest, ArXivSearchResult, ArXivSearchField, ArXivCategory, GroqLLMFn
 from groq import create_groq_client
@@ -105,12 +107,12 @@ def create_groq_llm() -> GroqLLMFn:
                 
                 For date filtering, use:
                 - submittedDate:[YYYYMMDD000000 TO YYYYMMDD235959]
-                  Example: submittedDate:[20230101000000 TO 20250331235959]
+                  Example: submittedDate:[20230101000000 TO 20250311235959]
                 
                 Here are some examples of the conversion:
-                1. "Find recent papers on quantum computing" → "cat:quant-ph AND (quantum computing) AND submittedDate:[20230101000000 TO 20250331235959]"
+                1. "Find recent papers on quantum computing" → "cat:quant-ph AND (quantum computing) AND submittedDate:[20230101000000 TO 20250311235959]"
                 2. "Papers by John Smith about neural networks" → "au:Smith_J AND (neural networks)"
-                3. "Latest research on climate change in physics" → "cat:physics AND (climate change) AND submittedDate:[20230101000000 TO 20250331235959]"
+                3. "Latest research on climate change in physics" → "cat:physics AND (climate change) AND submittedDate:[20230101000000 TO 20250311235959]"
                 
                 Available search fields in the arXiv API:
                 - ti: Title search
@@ -146,25 +148,54 @@ def create_groq_llm() -> GroqLLMFn:
             # Get the converted syntax from Groq
             conversion_response = await groq_client(conversion_request)
             
-            # Debug the response structure
+            # Debug the response structure in detail
             logger.debug(f"Response type: {type(conversion_response)}")
             logger.debug(f"Response structure: {conversion_response.model_dump()}")
+            logger.debug(f"Choices type: {type(conversion_response.choices)}")
+            if conversion_response.choices:
+                logger.debug(f"First choice type: {type(conversion_response.choices[0])}")
+                logger.debug(f"First choice content: {conversion_response.choices[0]}")
+                # Try to inspect the message structure
+                try:
+                    if hasattr(conversion_response.choices[0], 'message'):
+                        logger.debug(f"Message type: {type(conversion_response.choices[0].message)}")
+                        logger.debug(f"Message content: {conversion_response.choices[0].message}")
+                    elif isinstance(conversion_response.choices[0], dict) and 'message' in conversion_response.choices[0]:
+                        logger.debug(f"Message type: {type(conversion_response.choices[0]['message'])}")
+                        logger.debug(f"Message content: {conversion_response.choices[0]['message']}")
+                except Exception as e:
+                    logger.debug(f"Error inspecting message: {e}")
             
             # Extract the content safely
             try:
+                # First try to access as an attribute
                 raw_content = conversion_response.choices[0].message.content.strip()
             except (AttributeError, IndexError, KeyError) as extract_error:
                 logger.error(f"Error extracting content: {extract_error}")
-                logger.error(f"Response structure: {conversion_response}")
+                logger.debug(f"Response structure: {conversion_response}")
                 # Try alternative access patterns
                 try:
+                    # Try to access as a dictionary
                     raw_content = conversion_response.choices[0]["message"]["content"].strip()
                 except (AttributeError, IndexError, KeyError, TypeError):
                     try:
-                        # Last resort
-                        raw_content = str(conversion_response.choices[0])
-                    except (AttributeError, IndexError):
-                        raw_content = "quantum computing"  # Default fallback
+                        # Try to access using get method
+                        message = conversion_response.choices[0].get("message", {})
+                        raw_content = message.get("content", "")
+                        if not raw_content:
+                            # If still empty, try direct dictionary access
+                            raw_content = conversion_response.choices[0].message["content"].strip()
+                    except (AttributeError, IndexError, KeyError, TypeError):
+                        try:
+                            # Last resort - try to extract from the string representation
+                            choice_str = str(conversion_response.choices[0])
+                            content_match = re.search(r"'content':\s*'([^']*)'", choice_str)
+                            if content_match:
+                                raw_content = content_match.group(1)
+                            else:
+                                raw_content = "quantum computing"  # Default fallback
+                        except (AttributeError, IndexError):
+                            raw_content = "quantum computing"  # Default fallback
             
             logger.info(f"Raw LLM output: {raw_content}")
             
@@ -186,6 +217,18 @@ def create_groq_llm() -> GroqLLMFn:
                         arxiv_syntax = line
                         break
             
+            # Clean up the syntax - remove any surrounding quotes
+            arxiv_syntax = arxiv_syntax.strip('"\'')
+
+            # Check if there are any obvious syntax errors
+            if arxiv_syntax.count('(') != arxiv_syntax.count(')'):
+                logger.warning(f"Unbalanced parentheses in syntax: {arxiv_syntax}")
+                # Try to fix by adding missing parenthesis
+                if arxiv_syntax.count('(') > arxiv_syntax.count(')'):
+                    arxiv_syntax += ')'
+                else:
+                    arxiv_syntax = '(' + arxiv_syntax
+            
             logger.info(f"Extracted arXiv syntax: {arxiv_syntax}")
             
             # Step 2: Search arXiv with the converted syntax
@@ -197,7 +240,24 @@ def create_groq_llm() -> GroqLLMFn:
             )
             
             # Get results from arXiv
-            arxiv_results = await arxiv_client(arxiv_request)
+            max_retries = 3
+            retry_delay = 3  # seconds
+            last_error = None
+            
+            for attempt in range(max_retries):
+                try:
+                    arxiv_results = await arxiv_client(arxiv_request)
+                    break  # Success, exit the retry loop
+                except Exception as e:
+                    last_error = e
+                    logger.warning(f"arXiv API error on attempt {attempt+1}/{max_retries}: {e}")
+                    if attempt < max_retries - 1:
+                        logger.info(f"Waiting {retry_delay} seconds before retry...")
+                        await asyncio.sleep(retry_delay)
+                        retry_delay *= 1.5  # Exponential backoff
+                    else:
+                        logger.error(f"Max retries exceeded for arXiv API call")
+                        raise  # Re-raise the last error after all retries fail
             
             # Step 3: Save the raw results to a file
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
