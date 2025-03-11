@@ -5,7 +5,7 @@ Thank you for considering contributing to the Research Assistant project! This d
 ## Development Setup
 
 1. Fork the repository
-2. Clone your fork: `git clone https://github.com/your-username/research-assistant.git`
+2. Clone your fork: `git clone https://github.com/your-username/ArXiv-Research-Agent.git`
 3. Create a virtual environment: `python -m venv venv`
 4. Activate the environment: 
    - Windows: `venv\Scripts\activate`
