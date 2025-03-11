@@ -14,7 +14,7 @@ This proof-of-concept implements:
 ## How it Works
 
 1. User enters a natural language query (e.g., "Find me recent papers on quantum computing applications in finance")
-2. Groq LLM converts this to arXiv search syntax (e.g., "cat:quant-ph AND (quantum computing) AND (finance OR financial) AND submittedDate:[20230101 TO 20231231]")
+2. Groq LLM converts this to arXiv search syntax (e.g., "cat:quant-ph AND (quantum computing) AND (finance OR financial) AND submittedDate:[20230101 TO 20250331]")
 3. arXiv API is queried with the converted syntax
 4. Results are returned and saved to the `arXiv_results` folder
 5. LLM formats a user-friendly response with paper summaries and links
@@ -30,7 +30,7 @@ Key search operators:
 - Exact phrase matching with quotes: "quantum computing"
 
 Example conversions:
-- "Recent papers on quantum computing" → "cat:quant-ph AND (quantum computing) AND submittedDate:[20230101 TO 20231231]"
+- "Recent papers on quantum computing" → "cat:quant-ph AND (quantum computing) AND submittedDate:[20230101 TO 20250331]"
 - "Papers by John Smith about neural networks" → "au:Smith_J AND (neural networks)"
 
 ## Setup
@@ -48,6 +48,17 @@ pip install -r requirements.txt
 ```
 
 3. Run the script:
+
+some examples:
+
+Papers by Geoffrey Hinton about deep learning
+Recent research on large language models in both computer science and statistics
+Find papers with "transformer" in the title related to natural language processing
+Papers about reinforcement learning that don't mention robotics
+Papers on climate modeling published in the first half of 2024
+Research combining quantum physics and machine learning
+ICML 2023 papers about diffusion models
+
 
 ```bash
 cd examples/arXiv_search
