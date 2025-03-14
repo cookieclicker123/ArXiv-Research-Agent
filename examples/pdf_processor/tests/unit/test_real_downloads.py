@@ -3,6 +3,7 @@ import json
 import sys
 from pathlib import Path
 import logging
+import datetime
 
 # Add the project root to the Python path so we can import from src
 project_root = Path(__file__).parent.parent.parent
@@ -14,7 +15,7 @@ from src.models import (
     DownloaderConfig,
     ArXivSearchResult
 )
-from src.pdf_downloader import create_pdf_downloader
+from src.pdf_downloader import create_pdf_downloader, extract_paper_metadata
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, 
@@ -46,6 +47,7 @@ def setup_dirs():
 def load_papers_from_json_files(json_files, max_papers_per_file=1):
     """Load the first paper from each JSON file"""
     papers = []
+    metadata_map = {}
     
     for json_file in json_files:
         try:
@@ -65,12 +67,40 @@ def load_papers_from_json_files(json_files, max_papers_per_file=1):
                         'source_file': json_file.name
                     })
                     
+                    # Extract and store metadata for each paper
+                    paper_metadata = extract_paper_metadata(paper)
+                    # Add query information to metadata
+                    paper_metadata["query"] = search_result.query
+                    # Add source file information
+                    paper_metadata["source_file"] = json_file.name
+                    
+                    metadata_map[paper.id] = paper_metadata
+                    
             logger.info(f"Loaded {min(max_papers_per_file, len(search_result.papers))} papers from {json_file}")
                 
         except Exception as e:
             logger.error(f"Error loading {json_file}: {str(e)}")
     
-    return papers
+    return papers, metadata_map
+
+def save_paper_record(paper_id, record_data):
+    """Save a paper record to its own JSON file in the PDFs directory"""
+    record_path = OUTPUT_DIR / f"{paper_id}.json"
+    with open(record_path, 'w') as f:
+        json.dump(record_data, f, indent=2)
+    logger.info(f"Saved paper record to {record_path}")
+    return record_path
+
+def load_paper_record(paper_id):
+    """Load a paper record from its JSON file"""
+    record_path = OUTPUT_DIR / f"{paper_id}.json"
+    if record_path.exists():
+        try:
+            with open(record_path, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"Failed to load paper record for {paper_id}: {e}")
+    return None
 
 @pytest.mark.real
 @pytest.mark.asyncio
@@ -79,7 +109,7 @@ async def test_real_pdf_downloads(setup_dirs):
     json_files = setup_dirs
     
     # Load papers from JSON files (first paper from each file)
-    papers = load_papers_from_json_files(json_files, max_papers_per_file=1)
+    papers, metadata_map = load_papers_from_json_files(json_files, max_papers_per_file=1)
     
     if not papers:
         pytest.skip("No valid papers found in JSON files. Skipping test.")
@@ -87,17 +117,30 @@ async def test_real_pdf_downloads(setup_dirs):
     logger.info(f"Found {len(papers)} papers to download")
     
     # Create download requests
-    requests = [
-        DownloadRequest(
-            paper_id=paper['paper_id'],
-            pdf_url=paper['pdf_url'],
-            output_path=OUTPUT_DIR / f"{paper['paper_id']}.pdf",
-            max_retries=3,
-            timeout=60
+    requests = []
+    for paper in papers:
+        paper_id = paper['paper_id']
+        
+        # Check if we already have this paper
+        existing_record = load_paper_record(paper_id)
+        if existing_record and Path(existing_record["output_path"]).exists():
+            logger.info(f"Paper {paper_id} already downloaded, skipping")
+            continue
+            
+        requests.append(
+            DownloadRequest(
+                paper_id=paper_id,
+                pdf_url=paper['pdf_url'],
+                output_path=OUTPUT_DIR / f"{paper_id}.pdf",
+                max_retries=3,
+                timeout=60
+            )
         )
-        for paper in papers
-    ]
     
+    if not requests:
+        logger.info("All papers already downloaded, nothing to do")
+        return
+        
     # Configure downloader
     config = DownloaderConfig(
         concurrent_downloads=2,  # Limit concurrency to be respectful
@@ -109,9 +152,9 @@ async def test_real_pdf_downloads(setup_dirs):
     # Create downloader
     pdf_downloader = create_pdf_downloader(config)
     
-    # Download PDFs
+    # Download PDFs with metadata
     logger.info(f"Starting download of {len(requests)} PDFs")
-    results = await pdf_downloader(requests)
+    results = await pdf_downloader(requests, metadata_map)
     
     # Check results
     assert len(results) == len(requests)
@@ -127,7 +170,28 @@ async def test_real_pdf_downloads(setup_dirs):
         logger.error(f"Failed to download {failure.paper_id}: {failure.error_message}")
     
     # Verify at least some downloads were successful
-    assert len(successes) > 0, "No PDFs were successfully downloaded"
+    if requests:
+        assert len(successes) > 0, "No PDFs were successfully downloaded"
+    
+    # Create individual paper records for successful downloads
+    for result in successes:
+        paper_id = result.paper_id
+        metadata = metadata_map.get(paper_id, {})
+        
+        # Create a standalone record for this paper
+        paper_record = {
+            "paper_id": paper_id,
+            "pdf_url": str(result.pdf_url),
+            "output_path": str(result.output_path),
+            "download_time": result.download_time,
+            "file_size": result.file_size,
+            "download_date": datetime.datetime.now().isoformat(),
+            "metadata": metadata,
+            "full_text": None  # Will be populated in the next phase
+        }
+        
+        # Save to individual file in the PDFs directory
+        save_paper_record(paper_id, paper_record)
     
     # Verify files exist and are valid PDFs
     for result in successes:
@@ -139,9 +203,18 @@ async def test_real_pdf_downloads(setup_dirs):
             content = f.read(10)  # Read first 10 bytes
             assert content.startswith(b'%PDF'), f"File {result.output_path} is not a valid PDF"
         
-        logger.info(f"Successfully downloaded {result.paper_id} to {result.output_path}")
+        # Check if individual record file exists
+        record_path = OUTPUT_DIR / f"{result.paper_id}.json"
+        assert record_path.exists(), f"Record file {record_path} does not exist"
+        
+        logger.info(f"Successfully downloaded and recorded {result.paper_id} to {result.output_path}")
     
     # Print summary
-    for i, paper in enumerate(papers):
-        status = "✅ Success" if results[i].status == DownloadStatus.COMPLETED else "❌ Failed"
-        logger.info(f"{status}: {paper['paper_id']} - {paper['title']} (from {paper['source_file']})")
+    for paper in papers:
+        paper_id = paper['paper_id']
+        record = load_paper_record(paper_id)
+        if record:
+            status = "✅ Success"
+        else:
+            status = "❌ Failed"
+        logger.info(f"{status}: {paper_id} - {paper['title']} (from {paper['source_file']})")

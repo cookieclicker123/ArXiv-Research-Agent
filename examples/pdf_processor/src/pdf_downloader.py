@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import time
+import datetime
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 import backoff
@@ -29,19 +30,6 @@ def create_pdf_downloader(config: Optional[DownloaderConfig] = None) -> BatchDow
     
     # Ensure output directory exists (one-time setup)
     config.output_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Define the download record path
-    download_record_path = config.output_dir / "download_records.json"
-    
-    # Load any existing download records to avoid re-downloading
-    download_records: Dict[str, Any] = {}
-    if download_record_path.exists():
-        try:
-            with open(download_record_path, 'r') as f:
-                download_records = json.load(f)
-            logger.info(f"Loaded {len(download_records)} existing download records")
-        except Exception as e:
-            logger.warning(f"Failed to load download records: {e}")
     
     # Create a shared client session for all downloads
     client_params = {
@@ -82,18 +70,44 @@ def create_pdf_downloader(config: Optional[DownloaderConfig] = None) -> BatchDow
                 "download_time": download_time
             }
     
-    async def download_single_pdf(request: DownloadRequest) -> DownloadResult:
+    def save_paper_record(paper_id: str, record_data: Dict[str, Any]) -> Path:
+        """Save a paper record to its own JSON file"""
+        record_path = config.output_dir / f"{paper_id}.json"
+        with open(record_path, 'w') as f:
+            json.dump(record_data, f, indent=2)
+        logger.info(f"Saved paper record to {record_path}")
+        return record_path
+    
+    def load_paper_record(paper_id: str) -> Optional[Dict[str, Any]]:
+        """Load a paper record from its JSON file"""
+        record_path = config.output_dir / f"{paper_id}.json"
+        if record_path.exists():
+            try:
+                with open(record_path, 'r') as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.warning(f"Failed to load paper record for {paper_id}: {e}")
+        return None
+    
+    async def download_single_pdf(request: DownloadRequest, paper_metadata: Optional[Dict[str, Any]] = None) -> DownloadResult:
         """Inner function to download a single PDF"""
         logger.info(f"Downloading PDF for paper {request.paper_id} from {request.pdf_url}")
         
-        # Check if already downloaded
-        if request.paper_id in download_records:
+        # Check if already downloaded by looking for individual record file
+        record = load_paper_record(request.paper_id)
+        if record:
             logger.info(f"Paper {request.paper_id} already downloaded")
-            record = download_records[request.paper_id]
             output_path = Path(record["output_path"])
             
             # Verify the file still exists
             if output_path.exists():
+                # Update metadata if new metadata is provided
+                if paper_metadata and "metadata" in record:
+                    # Merge new metadata with existing metadata, preferring new values
+                    record["metadata"].update(paper_metadata)
+                    # Save updated record
+                    save_paper_record(request.paper_id, record)
+                
                 return DownloadResult(
                     paper_id=request.paper_id,
                     pdf_url=request.pdf_url,
@@ -115,18 +129,24 @@ def create_pdf_downloader(config: Optional[DownloaderConfig] = None) -> BatchDow
                     output_path=request.output_path
                 )
                 
-                # Record the download
-                download_records[request.paper_id] = {
+                # Get current datetime in ISO format
+                current_datetime = datetime.datetime.now().isoformat()
+                
+                # Create record with enhanced metadata
+                record = {
+                    "paper_id": request.paper_id,
                     "pdf_url": str(request.pdf_url),
                     "output_path": str(request.output_path),
                     "download_time": result["download_time"],
                     "file_size": result["file_size"],
-                    "timestamp": time.time()
+                    "download_date": current_datetime,
+                    "metadata": paper_metadata or {},
+                    # Full text will be added later in the pipeline
+                    "full_text": None
                 }
                 
-                # Save updated records
-                with open(download_record_path, 'w') as f:
-                    json.dump(download_records, f, indent=2)
+                # Save individual paper record
+                save_paper_record(request.paper_id, record)
                 
                 return DownloadResult(
                     paper_id=request.paper_id,
@@ -168,7 +188,7 @@ def create_pdf_downloader(config: Optional[DownloaderConfig] = None) -> BatchDow
                 error_message=error_message
             )
     
-    async def batch_download_pdfs(requests: List[DownloadRequest]) -> List[DownloadResult]:
+    async def batch_download_pdfs(requests: List[DownloadRequest], paper_metadata_map: Optional[Dict[str, Dict[str, Any]]] = None) -> List[DownloadResult]:
         """Process a batch of download requests with rate limiting and concurrency control"""
         logger.info(f"Starting batch download of {len(requests)} PDFs")
         
@@ -177,7 +197,9 @@ def create_pdf_downloader(config: Optional[DownloaderConfig] = None) -> BatchDow
         
         async def download_with_rate_limit(request: DownloadRequest) -> DownloadResult:
             async with semaphore:
-                result = await download_single_pdf(request)
+                # Get metadata for this paper if available
+                metadata = paper_metadata_map.get(request.paper_id) if paper_metadata_map else None
+                result = await download_single_pdf(request, metadata)
                 # Apply rate limiting to avoid overwhelming the server
                 await asyncio.sleep(config.rate_limit_delay)
                 return result
@@ -203,7 +225,7 @@ def create_pdf_downloader(config: Optional[DownloaderConfig] = None) -> BatchDow
         
         return results
     
-    # Return the batch download function
+    # Return the batch download function with modified signature to accept metadata
     return batch_download_pdfs
 
 def load_search_results_from_directory(input_dir: Path) -> List[ArXivSearchResult]:
@@ -226,6 +248,18 @@ def load_search_results_from_directory(input_dir: Path) -> List[ArXivSearchResul
     
     return results
 
+def extract_paper_metadata(paper) -> Dict[str, Any]:
+    """Extract metadata from an ArXiv paper object"""
+    return {
+        "title": paper.title,
+        "authors": [author.model_dump() for author in paper.authors],
+        "summary": paper.summary,
+        "published": str(paper.published),
+        "updated": str(paper.updated),
+        "categories": paper.categories,
+        # Additional fields can be added here as needed
+    }
+
 async def process_all_search_results(
     input_dir: Path, 
     output_dir: Path, 
@@ -247,21 +281,29 @@ async def process_all_search_results(
     # Process each search result
     results_by_query = {}
     for search_result in search_results:
-        # Create download requests
-        requests = [
-            DownloadRequest(
+        # Create download requests and metadata map
+        requests = []
+        metadata_map = {}
+        
+        for paper in search_result.papers:
+            # Create download request
+            request = DownloadRequest(
                 paper_id=paper.id,
                 pdf_url=paper.pdf_url,
                 output_path=output_dir / f"{paper.id}.pdf",
                 max_retries=config.max_retries,
                 timeout=config.timeout
             )
-            for paper in search_result.papers
-        ]
+            requests.append(request)
+            
+            # Extract and store metadata
+            metadata_map[paper.id] = extract_paper_metadata(paper)
+            # Add query information to metadata
+            metadata_map[paper.id]["query"] = search_result.query
         
-        # Download PDFs
+        # Download PDFs with metadata
         logger.info(f"Processing search result: {search_result.query} with {len(requests)} papers")
-        download_results = await pdf_downloader(requests)
+        download_results = await pdf_downloader(requests, metadata_map)
         
         # Store results by query
         results_by_query[search_result.query] = download_results
