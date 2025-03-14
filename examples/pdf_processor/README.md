@@ -18,5 +18,6 @@ python -m pytest tests/unit/test_mock_pdf_downloader.py -v
 
 ```bash
 python -m pytest tests/unit/test_pdf_downloader.py -v
+python -m pytest tests/unit/test_real_downloads.py -v
 ```
 
