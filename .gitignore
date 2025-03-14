@@ -43,6 +43,7 @@ logs/
 .coverage
 htmlcov/
 .pytest_cache/
+tmp
 
 # Project specific
 data/
