@@ -23,14 +23,14 @@ Phase 1 (arXiv Search) is complete and working in the examples directory.
 - Return formatted results with paper metadata
 - Save results for further processing
 
-### Phase 2: PDF Processing & Embedding
+### Phase 2: PDF Processing & Embedding ✅
 - Download PDFs from arXiv links
 - Extract text with PyMuPDF
 - Generate embeddings for semantic search
 - Create FAISS indices with paper ID tagging
 - Implement chunking strategies for better search
 
-### Phase 3: Local Knowledge Base
+### Phase 3: Local Knowledge Base ✅
 - Build metadata search using JSON files
 - Implement vector search using FAISS indices
 - Create combined search ranking
@@ -58,6 +58,7 @@ Phase 1 (arXiv Search) is complete and working in the examples directory.
 - CI/CD pipeline
 - Monitoring and logging
 - Performance optimization
+- Extended features: use small local translation models for all latin languages and manderin
 
 ## Technical Architecture
 
